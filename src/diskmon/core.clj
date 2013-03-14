@@ -1,5 +1,6 @@
 (ns diskmon.core
   (:use
+   [clojure.tools.cli :only [cli]]
    [twitter.oauth]
    [twitter.callbacks]
    [twitter.callbacks.handlers]
@@ -16,16 +17,6 @@
      (FileSystems/getDefault)
      (.getFileStores)))
 
-;; wrapper fn for method
-
-(defn- fs-name [fs]
-  (.name fs))
-
-;; wrapper fn for method
-
-(defn- free-space [fs]
-  (.getUnallocatedSpace fs))
-
 ;; the file systems
 
 (def file-systems (file-stores))
@@ -33,32 +24,28 @@
 ;; seq of file system name/remaining space pairs
 
 (defn remaining-space []
-  (mapcat (juxt fs-name free-space) file-systems))
-
-;; blah
-
-(defn less-than? [size entry]
-  (< (val entry) size))
+  (map (juxt (memfn toString) (memfn getUnallocatedSpace)) file-systems))
 
 ;; find all file systems matching predicate
 
 (defn find-fs [pred]
-  (filter pred (apply hash-map (remaining-space))))
+  (into {} (for [[k v] (remaining-space) :when (pred v)] [k v])))
 
 ;; tweet them
 
-(def *app-consumer-key* "0UOWJfsnM007MYAgC31fw")
+;; config file should be in form of Clojure map with the mentioned keys
+(def twitter-config
+  (-> 
+   "config.clj" 
+   (slurp)
+   (read-string)))
 
-(def *app-consumer-secret* "abEGspPo5nK9JIDuuhFjkICfpYJb0szVtjcJScjTZ8")
-
-(def *user-access-token* "1265394246-f3qMA9vXONhRqaE6VtZbvVGoKyhJM9ikOrxXnIg")
-
-(def *user-access-token-secret* "NfmnHxXKlufvsg4eTCiBMTbxA1tAqUx9aoFzY9WpJI")
-
-(def twitter-creds (make-oauth-creds *app-consumer-key*
-                                     *app-consumer-secret*
-                                     *user-access-token*
-                                     *user-access-token-secret*))
+(def twitter-creds 
+  (let [{:keys [app-consumer-key app-consumer-secret user-access-token user-access-token-secret]} twitter-config]
+    (make-oauth-creds app-consumer-key 
+                      app-consumer-secret 
+                      user-access-token 
+                      user-access-token-secret)))
 
 (def host-name 
   (-> 
@@ -69,6 +56,18 @@
   (statuses-update :oauth-creds twitter-creds
                    :params      {:status m}))
 
-(defn -main [& {:keys [size] :or {size 1000000}}]
-  (doseq [low-fs (find-fs (partial less-than? size))]
-    (println (str host-name ":" (key low-fs) " low on disk space"))))
+(def default-size (* 1024 1024 1024)) ;; 1GB
+
+(defn now [] (->
+              (java.util.Date.)
+              (.getTime)
+              java.sql.Timestamp.))
+
+(defn -main [& args]
+  (let [options (cli args
+                  ["-s" "--size" "disk size to check" :default default-size :parse-fn #(Long/valueOf %)]
+                  ["-c" "--config" "location of config file" :default "config.clj"])
+        m (first options)
+        size (:size m)]
+    (doseq [low-fs (find-fs (partial < size))]
+      (tweet (str host-name ":" (key low-fs) " low on disk space " (now))))))
